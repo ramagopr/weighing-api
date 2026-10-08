@@ -1,0 +1,96 @@
+trigger:
+  - main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  buildConfiguration: Release
+  azureServiceConnection: azure-dev-connection
+  webAppName: weighing-api-dev
+
+stages:
+  # CI: compile and package the application
+  - stage: Build
+    displayName: Build and package
+
+    jobs:
+      - job: BuildApi
+        displayName: Build weighing API
+
+        steps:
+          - checkout: self
+
+          - task: UseDotNet@2
+            displayName: Install .NET 8 SDK
+            inputs:
+              packageType: sdk
+              version: '8.x'
+
+          - script: dotnet restore WeighingApi.csproj
+            displayName: Restore dependencies
+
+          - script: >
+              dotnet build WeighingApi.csproj
+              --configuration $(buildConfiguration)
+              --no-restore
+            displayName: Build application
+
+          - script: >
+              dotnet publish WeighingApi.csproj
+              --configuration $(buildConfiguration)
+              --no-build
+              --output "$(Build.ArtifactStagingDirectory)/app"
+            displayName: Package application
+
+          - task: PublishPipelineArtifact@1
+            displayName: Upload deployment artifact
+            inputs:
+              targetPath: '$(Build.ArtifactStagingDirectory)/app'
+              artifact: weighing-api
+
+  # CD: deploy the same artifact produced above
+  - stage: DeployDev
+    displayName: Deploy to development
+    dependsOn: Build
+    condition: |
+      and(
+        succeeded(),
+        eq(variables['Build.SourceBranch'], 'refs/heads/main')
+      )
+
+    jobs:
+      - deployment: DeployWeighingApi
+        displayName: Deploy weighing API
+        environment: weighing-dev
+
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: none
+
+                # Disable automatic artifact downloads
+                - download: none
+
+                - download: current
+                  artifact: weighing-api
+                  displayName: Download deployment artifact
+
+                - task: AzureWebApp@1
+                  displayName: Deploy to Azure App Service
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    appType: webAppLinux
+                    appName: '$(webAppName)'
+                    runtimeStack: 'DOTNETCORE|8.0'
+                    package: '$(Pipeline.Workspace)/weighing-api'
+
+                - script: |
+                    curl --fail --show-error \
+                      --retry 6 \
+                      --retry-delay 10 \
+                      --retry-all-errors \
+                      --max-time 30 \
+                      "https://$(webAppName).azurewebsites.net/health"
+                  displayName: Verify application health
